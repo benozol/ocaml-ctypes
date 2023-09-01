@@ -10,6 +10,19 @@ let header ="\
  * See the file LICENSE for details.
  *)
 
+(** Primitives and sizes
+
+    By default, size and aligment of the type [size_t] and of pointers are
+    generated for the host platform where the code is compiled. But the
+    execution fails, if the resulting executable is in turn compiled to a
+    platform with different word size. For this, the size and aligment of
+    [size_t] and pointers can be overridden either using the environment
+    variable [CTYPES_WORD_SIZE] either at execution time or at compilation time
+    of the [ocaml-ctypes] library. For example, use [CTYPES_WORD_SIZE=4] when
+    your program that was originally compiled on a 64-bit platform is executed
+    on a 32-bit platform like WebAssembly.
+*)
+
 open Ctypes_primitive_types
 "
 
@@ -81,6 +94,21 @@ let generate name typ f =
     end;
     printf "\n") c_primitives
 
+let word_size_override =
+  Option.map int_of_string (Sys.getenv_opt "CTYPES_WORD_SIZE")
+
+let dyn_size_t_fmt: _ format = "\
+let word_size_override =
+  Option.map int_of_string (Sys.getenv_opt \"CTYPES_WORD_SIZE\")
+let size_t_size = Option.value word_size_override ~default:%d
+let size_t_align = Option.value word_size_override ~default:%d
+"
+
+let const_size_t_fmt: _ format = "\
+let size_t_size = %d
+let size_t_align = %d
+"
+
 let prelude = "\
 #if defined(__MINGW32__) || defined(__MINGW64__)
 #define __USE_MINGW_ANSI_STDIO 1
@@ -110,15 +138,30 @@ let () =
       match C.C_define.(import c ~prelude ~includes [l,Type.Int]) with
       |[_,C.C_define.Value.Int i] -> i
       |_ -> failwith ("unable to find integer definition for " ^ l) in
-    let import_string l  =
+    let import_string l =
       match C.C_define.(import c ~prelude ~includes [l,Type.String]) with
       |[_,C.C_define.Value.String s] -> s
       |_ -> failwith ("unable to find string definition for " ^ l) in
+    let import_prop prop p =
+      if p.constructor = "Size_t" then
+        match prop with
+        | `Size -> "size_t_size"
+        | `Align -> "size_t_align"
+      else
+        let l = match prop with `Size -> p.size | `Align -> p.alignment in
+        string_of_int (import_int l) in
+    let size_t_prim =
+      List.find (fun p -> p.constructor = "Size_t") c_primitives in
     print_string header;
-    generate "sizeof" "int" (fun { size } ->
-      printf "%d" (import_int size));
-    generate "alignment" "int" (fun { alignment } ->
-      printf "%d" (import_int alignment));
+    (match word_size_override with
+     | None -> printf dyn_size_t_fmt
+                 (import_int size_t_prim.size)
+                 (import_int size_t_prim.alignment)
+     | Some n -> printf const_size_t_fmt n n);
+    generate "sizeof" "int" (fun p ->
+      printf "%s" (import_prop `Size p));
+    generate "alignment" "int" (fun p ->
+      printf "%s" (import_prop `Align p));
     generate "name" "string" (fun { typ } ->
       printf "%S" (import_string ("STRINGIFY("^typ^")")));
     generate "format_string" "string option" (fun { format } ->
@@ -129,6 +172,13 @@ let () =
         printf "Some %S" ("%"^(import_string str))
       | No_format ->
         printf "None");
-    printf "let pointer_size = %d\n" (import_int "sizeof(void*)");
-    printf "let pointer_alignment = %d\n" (import_int "alignof(void*)");
-  )
+    (match word_size_override with
+     | None ->
+       printf "let pointer_size = Option.value word_size_override ~default:%d\n"
+         (import_int "sizeof(void*)");
+       printf "let pointer_alignment = Option.value word_size_override ~default:%d\n"
+         (import_int "alignof(void*)")
+     | Some n ->
+       printf "let pointer_size = %d\n" n;
+       printf "let pointer_alignment = %d\n" n)
+    )
